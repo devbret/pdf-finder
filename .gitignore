@@ -1,0 +1,4 @@
+manifests/
+pdf_downloads/
+venv/
+.env
