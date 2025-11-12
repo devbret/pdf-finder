@@ -3,6 +3,7 @@ import re
 import json
 import time
 import csv
+import logging
 import requests
 from pathlib import Path
 from dotenv import load_dotenv, find_dotenv
@@ -15,7 +16,7 @@ load_dotenv(dotenv_path=env_path)
 
 def _parse_queries_env(raw: str):
     if not raw:
-        return ["keyword searches here"]
+        return ["personal branding seo"]
     raw = raw.strip()
     if raw.startswith("["):
         try:
@@ -34,6 +35,12 @@ if not API_KEY or not CX:
 API_ENDPOINT = os.getenv("API_ENDPOINT", "https://www.googleapis.com/customsearch/v1").strip()
 OUT_DIR = Path(os.getenv("OUT_DIR", "pdf_downloads").strip() or "pdf_downloads")
 MANIFEST_DIR = Path(os.getenv("MANIFEST_DIR", "manifests").strip() or "manifests")
+
+LOG_FILE = os.getenv("LOG_FILE", "pdf_finder.log").strip() or "pdf_finder.log"
+LOG_PATH = Path(LOG_FILE)
+if not LOG_PATH.is_absolute():
+    LOG_PATH = MANIFEST_DIR / LOG_PATH
+
 USER_AGENT = os.getenv("USER_AGENT", "pdf-finder/1.0").strip()
 QUERIES = _parse_queries_env(os.getenv("QUERIES", ""))
 
@@ -55,6 +62,30 @@ PAGES = _int_env("PAGES", 10)
 DELAY = _float_env("DELAY", 0.0)
 TIMEOUT = _int_env("TIMEOUT", 60)
 
+def setup_logger() -> logging.Logger:
+    MANIFEST_DIR.mkdir(parents=True, exist_ok=True)
+
+    logger = logging.getLogger("pdf_finder")
+    logger.setLevel(logging.INFO)
+
+    if not logger.handlers:
+        fmt = logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+
+        fh = logging.FileHandler(LOG_PATH, encoding="utf-8")
+        fh.setFormatter(fmt)
+        logger.addHandler(fh)
+
+        ch = logging.StreamHandler()
+        ch.setFormatter(fmt)
+        logger.addHandler(ch)
+
+    return logger
+
+LOGGER = setup_logger()
+
 def safe_filename(name: str) -> str:
     name = re.sub(r"[^\w\s\-.()]+", "", name)
     name = re.sub(r"\s+", " ", name).strip()
@@ -71,9 +102,10 @@ def is_pdf_response(resp):
     return "application/pdf" in resp.headers.get("Content-Type", "").lower()
 
 def search_pdfs(query, pages=PAGES):
+    LOGGER.info("Starting search for query: %s (pages=%d)", query, pages)
     results = []
     start = 1
-    for _ in range(pages):
+    for page in range(pages):
         params = {
             "key": API_KEY,
             "cx": CX,
@@ -83,10 +115,13 @@ def search_pdfs(query, pages=PAGES):
             "start": start,
             "safe": "off",
         }
+        LOGGER.info("Requesting Google CSE page %d for query '%s' (start=%d)", page + 1, query, start)
         r = requests.get(API_ENDPOINT, params=params, timeout=30)
         r.raise_for_status()
         data = r.json()
-        for item in data.get("items", []):
+        items = data.get("items", [])
+        LOGGER.info("Received %d items for query '%s' on page %d", len(items), query, page + 1)
+        for item in items:
             results.append({
                 "query": query,
                 "title": item.get("title", ""),
@@ -96,18 +131,22 @@ def search_pdfs(query, pages=PAGES):
             })
         next_page = data.get("queries", {}).get("nextPage", [{}])[0].get("startIndex")
         if not next_page:
+            LOGGER.info("No more pages for query '%s'", query)
             break
         start = next_page
         if DELAY:
             time.sleep(DELAY)
+    LOGGER.info("Finished search for query '%s' with %d total items", query, len(results))
     return results
 
 def dedupe(results):
+    LOGGER.info("Deduplicating %d results by link", len(results))
     seen, out = set(), []
     for r in results:
         if r["link"] not in seen:
             seen.add(r["link"])
             out.append(r)
+    LOGGER.info("Deduplication complete: %d unique links", len(out))
     return out
 
 def download_pdf(url, title_hint):
@@ -119,19 +158,28 @@ def download_pdf(url, title_hint):
             if not trial.exists():
                 path = trial
                 break
+
+    LOGGER.info("Downloading PDF: url=%s, title_hint=%s, target=%s", url, title_hint, path)
+
     try:
         with requests.get(url, stream=True, timeout=TIMEOUT, headers={"User-Agent": USER_AGENT}) as r:
             if r.status_code != 200:
-                return False, f"HTTP {r.status_code}"
+                msg = f"HTTP {r.status_code}"
+                LOGGER.warning("Download failed (%s) for url=%s", msg, url)
+                return False, msg
             if not is_pdf_response(r) and not url.lower().endswith(".pdf"):
-                return False, f"Not a PDF ({r.headers.get('Content-Type')})"
+                msg = f"Not a PDF ({r.headers.get('Content-Type')})"
+                LOGGER.warning("Download skipped: %s; url=%s", msg, url)
+                return False, msg
             OUT_DIR.mkdir(parents=True, exist_ok=True)
             with open(path, "wb") as f:
                 for chunk in r.iter_content(8192):
                     if chunk:
                         f.write(chunk)
+        LOGGER.info("Download succeeded: %s", path)
         return True, str(path)
     except Exception as e:
+        LOGGER.error("Exception while downloading url=%s: %s", url, e)
         return False, str(e)
 
 def save_manifest(data):
@@ -150,38 +198,58 @@ def save_manifest(data):
             out = {k: row.get(k, "") for k in fields}
             w.writerows([out])
 
+    LOGGER.info("Saved manifest JSON: %s", json_path)
+    LOGGER.info("Saved manifest CSV: %s", csv_path)
     print(f"Saved manifest: {json_path} and {csv_path}")
 
 def main():
+    LOGGER.info("=== Run started ===")
+    LOGGER.info("Queries: %s", QUERIES)
+    LOGGER.info("Output directory: %s", OUT_DIR.resolve())
+    LOGGER.info("Manifest directory: %s", MANIFEST_DIR.resolve())
+    LOGGER.info("Log file: %s", LOG_PATH.resolve())
+
     all_results = []
     for q in QUERIES:
         print(f"[search] {q}")
+        LOGGER.info("[search] %s", q)
         try:
             hits = search_pdfs(q)
         except requests.HTTPError as http_err:
-            print(f"  -> HTTP error: {http_err}")
+            msg = f"HTTP error: {http_err}"
+            print(f"  -> {msg}")
+            LOGGER.error("Search failed for query '%s': %s", q, http_err)
             hits = []
         except Exception as e:
-            print(f"  -> Error: {e}")
+            msg = f"Error: {e}"
+            print(f"  -> {msg}")
+            LOGGER.error("Search failed for query '%s': %s", q, e)
             hits = []
         print(f"  -> {len(hits)} results")
+        LOGGER.info("Query '%s' returned %d results", q, len(hits))
         for h in hits:
             h["status"], h["saved_as"], h["error"] = "", "", ""
         all_results.extend(hits)
 
     all_results = dedupe(all_results)
     print(f"[dedupe] {len(all_results)} unique links")
+    LOGGER.info("Total unique links after dedupe: %d", len(all_results))
 
     for i, item in enumerate(all_results, 1):
         url = item["link"]
         print(f"[{i}/{len(all_results)}] Downloading: {url}")
+        LOGGER.info("Preparing to download (%d/%d): %s", i, len(all_results), url)
         ok, info = download_pdf(url, item["title"])
         if ok:
             item["status"], item["saved_as"] = "downloaded", info
+            LOGGER.info("Marked as downloaded: url=%s, saved_as=%s", url, info)
         else:
             item["status"], item["error"] = "skipped", info
+            LOGGER.info("Marked as skipped: url=%s, reason=%s", url, info)
 
     save_manifest(all_results)
+    LOGGER.info("PDFs saved in: %s", OUT_DIR.resolve())
+    LOGGER.info("=== Run finished ===\n")
     print(f"PDFs saved in: {OUT_DIR.resolve()}")
 
 if __name__ == "__main__":
