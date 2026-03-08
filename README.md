@@ -1,13 +1,13 @@
 # PDF Finder
 
-PDF Finder is designed as a robust, end-to-end pipeline for discovering and downloading PDF documents from the public web using the Google Custom Search API. This script creates structured search queries, paginates through configured result sets and extracts full metadata—including titles, snippets and MIME types for every returned item.
+A Python-based document discovery and acquisition tool for locating and downloading public PDF files through the Google Custom Search JSON API.
 
-By explicitly appending `filetype:pdf` to each query and evaluating MIME responses server-side during download, the script ensures only valid PDF files are processed and stored. This makes it a reliable tool for gathering targeted documents at scale without manual oversight.
+## Overview
 
-A major strength of PDF Finder is its emphasis on safety, traceability and consistency. Every downloaded file is assigned a sanitized, filesystem-safe filename based on its discovered title or URL, with automatic conflict resolution to prevent overwrites.
+This application supports CLI arguments and environment defaults, constructs PDF-focused search queries, paginates across result pages, deduplicates URLs and records detailed metadata for every search hit. The tool includes resiliency through a shared requests session with retry handling, clear error classification for search failures such as quota issues.
 
-Comprehensive logging captures each stage of execution providing full transparency for debugging and auditing. Additionally, the deduplication mechanism prevents redundant downloads by removing repeated links across queries, ensuring efficient use of bandwidth and storage.
+PDF Finder also has rich manifests which capture search rank, page number, HTTP status, content type, content length, final URL, download timestamps, SHA-256 hashes and PDF validation results. A dry-run mode also allows you to inspect and export results without downloading files.
 
-The Python script also includes a complete manifest system for writing structured results to both JSON and CSV formats, allowing seamless integration with downstream workflows such as data analysis, archival or ingestion into research tools.
+To improve reliability and traceability, PDF Finder validates downloads beyond file extensions by checking response headers before saving content to disk. Downloaded files are written with sanitized names, while structured JSON, CSV and search-error outputs make the results easy to audit and feed into later workflows.
 
-Configurable environment variables make it easy to adjust behavior for large or repeated jobs, including pagination depth, request delay, timeout settings, output directories and user-defined search queries. Combined, these features make PDF Finder a flexible and production-ready solution for researchers, analysts and engineers who need an automated method for bulk PDF retrieval and metadata collection.
+Comprehensive logging captures the full lifecycle of each run, including query execution, deduplication, download attempts, skips and summary statistics. Together, these features make PDF Finder a dependable and reusable pipeline for researchers, analysts and engineers who need repeatable bulk PDF collection with strong observability and cleaner operational controls.
