@@ -22,6 +22,7 @@ env_path = find_dotenv()
 if env_path:
     load_dotenv(dotenv_path=env_path)
 
+
 @dataclass
 class SearchResult:
     query: str
@@ -43,6 +44,7 @@ class SearchResult:
     final_url: str = ""
     is_valid_pdf: bool = False
 
+
 @dataclass
 class SearchError:
     query: str
@@ -50,6 +52,7 @@ class SearchError:
     error_type: str
     message: str
     http_status: Optional[int] = None
+
 
 def _parse_queries(raw: str) -> List[str]:
     if not raw:
@@ -63,12 +66,27 @@ def _parse_queries(raw: str) -> List[str]:
             pass
     return [q.strip() for q in raw.split(",") if q.strip()]
 
+
+def _parse_domain_list(raw: str) -> List[str]:
+    if not raw:
+        return []
+    raw = raw.strip()
+    if raw.startswith("["):
+        try:
+            arr = json.loads(raw)
+            return [str(x).strip().lower() for x in arr if str(x).strip()]
+        except Exception:
+            pass
+    return [d.strip().lower() for d in raw.split(",") if d.strip()]
+
+
 def _int_env(name: str, default: int) -> int:
     v = os.getenv(name, "")
     try:
         return int(v) if v.strip() else default
     except Exception:
         return default
+
 
 def _float_env(name: str, default: float) -> float:
     v = os.getenv(name, "")
@@ -77,13 +95,16 @@ def _float_env(name: str, default: float) -> float:
     except Exception:
         return default
 
+
 def safe_filename(name: str) -> str:
     name = re.sub(r"[^\w\s\-.()]+", "", name)
     name = re.sub(r"\s+", " ", name).strip()
     return name[:120] or "document"
 
+
 def short_hash(text: str, length: int = 8) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:length]
+
 
 def guess_filename_from_url(url: str) -> str:
     try:
@@ -91,6 +112,7 @@ def guess_filename_from_url(url: str) -> str:
         return safe_filename(fname.replace(".pdf", ""))
     except Exception:
         return "document"
+
 
 def normalize_url(url: str) -> str:
     try:
@@ -120,14 +142,40 @@ def normalize_url(url: str) -> str:
     except Exception:
         return url.strip()
 
+
+def extract_hostname(url: str) -> str:
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except Exception:
+        return ""
+
+
+def is_blocked_domain(url: str, blocked_domains: List[str]) -> bool:
+    hostname = extract_hostname(url)
+    if not hostname:
+        return False
+
+    for blocked in blocked_domains:
+        blocked = blocked.lower().strip()
+        if not blocked:
+            continue
+        if hostname == blocked or hostname.endswith(f".{blocked}"):
+            return True
+
+    return False
+
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
 
 def is_pdf_by_headers(resp: Response) -> bool:
     return "application/pdf" in resp.headers.get("Content-Type", "").lower()
 
+
 def looks_like_pdf_bytes(data: bytes) -> bool:
     return data.startswith(b"%PDF-")
+
 
 def build_session(user_agent: str) -> Session:
     session = requests.Session()
@@ -146,6 +194,7 @@ def build_session(user_agent: str) -> Session:
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     return session
+
 
 def setup_logger(log_path: Path) -> logging.Logger:
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -168,6 +217,7 @@ def setup_logger(log_path: Path) -> logging.Logger:
         logger.addHandler(ch)
 
     return logger
+
 
 def classify_google_error(
     response: Optional[Response], data: Optional[Dict[str, Any]], exc: Optional[Exception]
@@ -204,6 +254,7 @@ def classify_google_error(
         return "request_error", msg, None
 
     return "unknown_error", "Unknown error", None
+
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -259,11 +310,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="User-Agent to use for requests.",
     )
     parser.add_argument(
+        "--blocked-domain",
+        action="append",
+        dest="blocked_domains",
+        help="Domain to avoid downloading from. Can be supplied multiple times.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Search and write manifests without downloading PDFs.",
     )
     return parser
+
 
 def load_config(args: argparse.Namespace) -> Dict[str, Any]:
     api_key = os.getenv("API_KEY")
@@ -278,6 +336,10 @@ def load_config(args: argparse.Namespace) -> Dict[str, Any]:
 
     if not queries:
         raise SystemExit("No queries provided. Use --query or set QUERIES in .env.")
+
+    env_blocked_domains = _parse_domain_list(os.getenv("BLOCKED_DOWNLOAD_DOMAINS", ""))
+    cli_blocked_domains = [d.strip().lower() for d in (args.blocked_domains or []) if d.strip()]
+    blocked_domains = cli_blocked_domains if cli_blocked_domains else env_blocked_domains
 
     pages = args.pages if args.pages is not None else _int_env("PAGES", 10)
     delay = args.delay if args.delay is not None else _float_env("DELAY", 0.0)
@@ -302,11 +364,13 @@ def load_config(args: argparse.Namespace) -> Dict[str, Any]:
         "LOG_PATH": log_path,
         "USER_AGENT": user_agent,
         "QUERIES": queries,
+        "BLOCKED_DOWNLOAD_DOMAINS": blocked_domains,
         "PAGES": pages,
         "DELAY": delay,
         "TIMEOUT": timeout,
         "DRY_RUN": args.dry_run,
     }
+
 
 def search_pdfs(
     session: Session,
@@ -422,6 +486,7 @@ def search_pdfs(
     logger.info("Finished search for query '%s' with %d total items", query, len(results))
     return results, errors
 
+
 def dedupe_results(results: List[SearchResult], logger: logging.Logger) -> List[SearchResult]:
     logger.info("Deduplicating %d results by normalized link", len(results))
     seen: set[str] = set()
@@ -437,11 +502,13 @@ def dedupe_results(results: List[SearchResult], logger: logging.Logger) -> List[
     logger.info("Deduplication complete: %d unique links", len(out))
     return out
 
+
 def choose_output_path(out_dir: Path, title_hint: str, url: str) -> Path:
     base = safe_filename(title_hint) or guess_filename_from_url(url)
     suffix = short_hash(url, 8)
     filename = f"{base}_{suffix}.pdf"
     return out_dir / filename
+
 
 def download_pdf(
     session: Session,
@@ -563,6 +630,7 @@ def download_pdf(
             "saved_as": "",
         }
 
+
 def save_manifest(
     manifest_dir: Path,
     logger: logging.Logger,
@@ -629,6 +697,7 @@ def save_manifest(
     print(f"Saved manifest: {csv_path}")
     print(f"Saved search errors: {errors_path}")
 
+
 def main() -> None:
     parser = build_arg_parser()
     args = parser.parse_args()
@@ -639,6 +708,7 @@ def main() -> None:
 
     logger.info("=== Run started ===")
     logger.info("Queries: %s", config["QUERIES"])
+    logger.info("Blocked download domains: %s", config["BLOCKED_DOWNLOAD_DOMAINS"])
     logger.info("Output directory: %s", config["OUT_DIR"].resolve())
     logger.info("Manifest directory: %s", config["MANIFEST_DIR"].resolve())
     logger.info("Log file: %s", config["LOG_PATH"].resolve())
@@ -678,6 +748,14 @@ def main() -> None:
         for i, item in enumerate(all_results, start=1):
             print(f"[{i}/{len(all_results)}] Downloading: {item.link}")
             logger.info("Preparing to download (%d/%d): %s", i, len(all_results), item.link)
+
+            if is_blocked_domain(item.link, config["BLOCKED_DOWNLOAD_DOMAINS"]):
+                blocked_host = extract_hostname(item.link)
+                item.status = "skipped"
+                item.error = f"Blocked domain: {blocked_host}"
+                item.downloaded_at = utc_now_iso()
+                logger.info("Skipped blocked domain: url=%s, hostname=%s", item.link, blocked_host)
+                continue
 
             ok, info = download_pdf(
                 session=session,
@@ -719,8 +797,13 @@ def main() -> None:
     downloaded_count = sum(1 for x in all_results if x.status == "downloaded")
     skipped_count = sum(1 for x in all_results if x.status == "skipped")
 
-    logger.info("Summary: total=%d downloaded=%d skipped=%d search_errors=%d",
-                len(all_results), downloaded_count, skipped_count, len(search_errors))
+    logger.info(
+        "Summary: total=%d downloaded=%d skipped=%d search_errors=%d",
+        len(all_results),
+        downloaded_count,
+        skipped_count,
+        len(search_errors),
+    )
     logger.info("PDFs saved in: %s", config["OUT_DIR"].resolve())
     logger.info("=== Run finished ===\n")
 
@@ -729,6 +812,7 @@ def main() -> None:
         f"Summary: total={len(all_results)}, downloaded={downloaded_count}, "
         f"skipped={skipped_count}, search_errors={len(search_errors)}"
     )
+
 
 if __name__ == "__main__":
     main()
