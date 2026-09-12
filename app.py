@@ -174,6 +174,19 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+SECRET_QUERY_PARAMS = ("key", "api_key", "cx")
+
+_SECRET_PARAM_RE = re.compile(
+    r"(?i)\b(" + "|".join(SECRET_QUERY_PARAMS) + r")=([^&\s'\"]+)"
+)
+
+
+def redact_secrets(text: str) -> str:
+    if not text:
+        return text
+    return _SECRET_PARAM_RE.sub(r"\1=REDACTED", text)
+
+
 def is_pdf_by_headers(resp: Response) -> bool:
     return "application/pdf" in resp.headers.get("Content-Type", "").lower()
 
@@ -236,7 +249,8 @@ def classify_google_error(
         except Exception:
             message = response.text[:500]
 
-        lowered = (message or "").lower()
+        message = redact_secrets(message or "")
+        lowered = message.lower()
 
         if status == 403 and ("quota" in lowered or "limit" in lowered):
             return "quota_exceeded", message, status
@@ -251,7 +265,7 @@ def classify_google_error(
         return "http_error", message, status
 
     if exc is not None:
-        msg = str(exc)
+        msg = redact_secrets(str(exc))
         lowered = msg.lower()
         if "timeout" in lowered:
             return "timeout", msg, None
